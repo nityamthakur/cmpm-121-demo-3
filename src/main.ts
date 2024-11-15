@@ -1,97 +1,115 @@
-// @deno-types="npm:@types/leaflet@^1.9.14"
 import leaflet from "leaflet";
-
-// Style sheets
 import "leaflet/dist/leaflet.css";
-import "./style.css";
-
-// Fix missing marker images
 import "./leafletWorkaround.ts";
-
-// Deterministic random number generator
 import luck from "./luck.ts";
 
-// Location of our classroom (as identified on Google Maps)
-const OAKES_CLASSROOM = leaflet.latLng(36.98949379578401, -122.06277128548504);
+interface Cell {
+  i: number;
+  j: number;
+}
 
-// Tunable gameplay parameters
-const GAMEPLAY_ZOOM_LEVEL = 19;
-const TILE_DEGREES = 1e-4;
+interface Coin {
+  serial: number;
+  cache: Cell;
+}
+
+// Global Coordinate System anchored at Null Island
+const NULL_ISLAND = { lat: 0, lng: 0 };
+const TILE_DEGREES = 0.0001;
 const NEIGHBORHOOD_SIZE = 8;
 const CACHE_SPAWN_PROBABILITY = 0.1;
 
-// Create the map (element with id "map" is defined in index.html)
+// Initialize Leaflet map
 const map = leaflet.map(document.getElementById("map")!, {
-  center: OAKES_CLASSROOM,
-  zoom: GAMEPLAY_ZOOM_LEVEL,
-  minZoom: GAMEPLAY_ZOOM_LEVEL,
-  maxZoom: GAMEPLAY_ZOOM_LEVEL,
+  center: [36.98949379578401, -122.06277128548504],
+  zoom: 19,
+  minZoom: 19,
+  maxZoom: 19,
   zoomControl: false,
   scrollWheelZoom: false,
 });
 
-// Populate the map with a background tile layer
-leaflet
-  .tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution:
-      '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  })
-  .addTo(map);
+leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution:
+    '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+}).addTo(map);
 
-// Add a marker to represent the player
-const playerMarker = leaflet.marker(OAKES_CLASSROOM);
+// Player marker
+const playerMarker = leaflet.marker([36.98949379578401, -122.06277128548504]).addTo(map);
 playerMarker.bindTooltip("That's you!");
-playerMarker.addTo(map);
 
-// Display the player's points
-let playerPoints = 0;
-const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!; // element `statusPanel` is defined in index.html
-statusPanel.innerHTML = "No points yet...";
+let playerCoins: Coin[] = [];
+const statusPanel = document.getElementById("statusPanel")!;
 
-// Add caches to the map by cell numbers
+// Use the Flyweight pattern to convert lat-lng to game cells
+function getCell(lat: number, lng: number): Cell {
+  return {
+    i: Math.floor((lat - NULL_ISLAND.lat) / TILE_DEGREES),
+    j: Math.floor((lng - NULL_ISLAND.lng) / TILE_DEGREES),
+  };
+}
+
+// Function to add caches with unique coins
 function spawnCache(i: number, j: number) {
-  // Convert cell numbers into lat/lng bounds
-  const origin = OAKES_CLASSROOM;
   const bounds = leaflet.latLngBounds([
-    [origin.lat + i * TILE_DEGREES, origin.lng + j * TILE_DEGREES],
-    [origin.lat + (i + 1) * TILE_DEGREES, origin.lng + (j + 1) * TILE_DEGREES],
+    [i * TILE_DEGREES, j * TILE_DEGREES],
+    [(i + 1) * TILE_DEGREES, (j + 1) * TILE_DEGREES],
   ]);
 
-  // Add a rectangle to the map to represent the cache
-  const rect = leaflet.rectangle(bounds);
-  rect.addTo(map);
+  const cache = leaflet.rectangle(bounds).addTo(map);
 
-  // Handle interactions with the cache
-  rect.bindPopup(() => {
-    // Each cache has a random point value, mutable by the player
-    let pointValue = Math.floor(luck([i, j, "initialValue"].toString()) * 100);
+  let coins: Coin[] = [];
+  const numCoins = Math.floor(luck([i, j, "initialCoins"].toString()) * 5 + 1);
 
-    // The popup offers a description and button
+  for (let serial = 0; serial < numCoins; serial++) {
+    coins.push({ serial, cache: { i, j } });
+  }
+
+  cache.bindPopup(() => {
+    const coinDisplay = coins
+      .map((coin) => `${coin.cache.i}:${coin.cache.j}#${coin.serial}`)
+      .join("<br>");
     const popupDiv = document.createElement("div");
     popupDiv.innerHTML = `
-                <div>There is a cache here at "${i},${j}". It has value <span id="value">${pointValue}</span>.</div>
-                <button id="poke">poke</button>`;
+      <div>Cache at ${i},${j} with ${coins.length} coins.</div>
+      <div>${coinDisplay}</div>
+      <button id="collect">Collect</button>
+      <button id="deposit">Deposit</button>
+    `;
 
-    // Clicking the button decrements the cache's value and increments the player's points
-    popupDiv
-      .querySelector<HTMLButtonElement>("#poke")!
-      .addEventListener("click", () => {
-        pointValue--;
-        popupDiv.querySelector<HTMLSpanElement>("#value")!.innerHTML =
-          pointValue.toString();
-        playerPoints++;
-        statusPanel.innerHTML = `${playerPoints} points accumulated`;
-      });
+    const collectButton = popupDiv.querySelector<HTMLButtonElement>("#collect")!;
+    const depositButton = popupDiv.querySelector<HTMLButtonElement>("#deposit")!;
+
+    collectButton.addEventListener("click", () => {
+      if (coins.length > 0) {
+        playerCoins.push(coins.pop()!);
+        updateStatusPanel();
+      }
+    });
+
+    depositButton.addEventListener("click", () => {
+      if (playerCoins.length > 0) {
+        coins.push(playerCoins.pop()!);
+        updateStatusPanel();
+      }
+    });
 
     return popupDiv;
   });
 }
 
-// Look around the player's neighborhood for caches to spawn
-for (let i = -NEIGHBORHOOD_SIZE; i < NEIGHBORHOOD_SIZE; i++) {
-  for (let j = -NEIGHBORHOOD_SIZE; j < NEIGHBORHOOD_SIZE; j++) {
-    // If location i,j is lucky enough, spawn a cache!
+function updateStatusPanel() {
+  statusPanel.innerHTML = `Coins: ${
+    playerCoins.map((coin) => `${coin.cache.i}:${coin.cache.j}#${coin.serial}`).join(", ")
+    }`;
+}
+
+// Generate caches based on player starting location
+const playerStartCell = getCell(36.98949379578401, -122.06277128548504);
+
+for (let i = playerStartCell.i - NEIGHBORHOOD_SIZE; i < playerStartCell.i + NEIGHBORHOOD_SIZE; i++) {
+  for (let j = playerStartCell.j - NEIGHBORHOOD_SIZE; j < playerStartCell.j + NEIGHBORHOOD_SIZE; j++) {
     if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
       spawnCache(i, j);
     }
