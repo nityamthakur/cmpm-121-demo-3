@@ -13,13 +13,36 @@ interface Coin {
   cache: Cell;
 }
 
+interface Momento<T> {
+  toMomento(): T;
+  fromMomento(momento: T): void;
+}
+
+class Geocache implements Momento<string> {
+  cell: Cell;
+  coins: Coin[];
+
+  constructor(cell: Cell, coins: Coin[]) {
+    this.cell = cell;
+    this.coins = coins;
+  }
+
+  toMomento() {
+    return JSON.stringify(this.coins);
+  }
+
+  fromMomento(momento: string) {
+    this.coins = JSON.parse(momento);
+  }
+}
+
 // Global Coordinate System anchored at Null Island
 const NULL_ISLAND = { lat: 0, lng: 0 };
 const TILE_DEGREES = 0.0001;
 const NEIGHBORHOOD_SIZE = 8;
 const CACHE_SPAWN_PROBABILITY = 0.1;
 
-// Initialize Leaflet map
+// Initialize map
 const map = leaflet.map(document.getElementById("map")!, {
   center: [36.98949379578401, -122.06277128548504],
   zoom: 19,
@@ -36,13 +59,13 @@ leaflet.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 // Player marker
-const playerMarker = leaflet.marker([36.98949379578401, -122.06277128548504]).addTo(map);
+let playerCell = getCell(36.98949379578401, -122.06277128548504);
+let playerMarker = leaflet.marker(cellToLatLng(playerCell)).addTo(map);
 playerMarker.bindTooltip("That's you!");
 
 let playerCoins: Coin[] = [];
 const statusPanel = document.getElementById("statusPanel")!;
 
-// Use the Flyweight pattern to convert lat-lng to game cells
 function getCell(lat: number, lng: number): Cell {
   return {
     i: Math.floor((lat - NULL_ISLAND.lat) / TILE_DEGREES),
@@ -50,69 +73,122 @@ function getCell(lat: number, lng: number): Cell {
   };
 }
 
-// Function to add caches with unique coins
-function spawnCache(i: number, j: number) {
-  const bounds = leaflet.latLngBounds([
-    [i * TILE_DEGREES, j * TILE_DEGREES],
-    [(i + 1) * TILE_DEGREES, (j + 1) * TILE_DEGREES],
-  ]);
+function cellToLatLng(cell: Cell): [number, number] {
+  return [cell.i * TILE_DEGREES, cell.j * TILE_DEGREES];
+}
 
-  const cache = leaflet.rectangle(bounds).addTo(map);
+const cacheMemory: { [key: string]: Geocache } = {};
 
-  let coins: Coin[] = [];
-  const numCoins = Math.floor(luck([i, j, "initialCoins"].toString()) * 5 + 1);
+function spawnOrRestoreCache(i: number, j: number) {
+  const key = `${i}:${j}`;
+  let geocache: Geocache;
 
-  for (let serial = 0; serial < numCoins; serial++) {
-    coins.push({ serial, cache: { i, j } });
+  if (cacheMemory[key]) {
+    geocache = cacheMemory[key];
+    geocache.fromMomento(geocache.toMomento());
+  } else {
+    const numCoins = Math.floor(luck([i, j, "initialCoins"].toString()) * 5 + 1);
+    const coins: Coin[] = Array.from({ length: numCoins }, (_, serial) => ({
+      serial,
+      cache: { i, j },
+    }));
+
+    geocache = new Geocache({ i, j }, coins);
+
+    cacheMemory[key] = geocache;
   }
 
-  cache.bindPopup(() => {
-    const coinDisplay = coins
+  const cacheBounds = leaflet.latLngBounds([
+    cellToLatLng({ i, j }),
+    cellToLatLng({ i: i + 1, j: j + 1 }),
+  ]);
+
+  const cacheRect = leaflet.rectangle(cacheBounds).addTo(map);
+
+  cacheRect.bindPopup(() => {
+    const coinDisplay = geocache.coins
       .map((coin) => `${coin.cache.i}:${coin.cache.j}#${coin.serial}`)
       .join("<br>");
     const popupDiv = document.createElement("div");
+
     popupDiv.innerHTML = `
-      <div>Cache at ${i},${j} with ${coins.length} coins.</div>
+      <div>Cache at ${i},${j} with ${geocache.coins.length} coins.</div>
       <div>${coinDisplay}</div>
       <button id="collect">Collect</button>
       <button id="deposit">Deposit</button>
     `;
 
-    const collectButton = popupDiv.querySelector<HTMLButtonElement>("#collect")!;
-    const depositButton = popupDiv.querySelector<HTMLButtonElement>("#deposit")!;
-
-    collectButton.addEventListener("click", () => {
-      if (coins.length > 0) {
-        playerCoins.push(coins.pop()!);
+    popupDiv.querySelector<HTMLButtonElement>("#collect")!.addEventListener("click", () => {
+      if (geocache.coins.length > 0) {
+        playerCoins.push(geocache.coins.pop()!);
         updateStatusPanel();
       }
     });
 
-    depositButton.addEventListener("click", () => {
+    popupDiv.querySelector<HTMLButtonElement>("#deposit")!.addEventListener("click", () => {
       if (playerCoins.length > 0) {
-        coins.push(playerCoins.pop()!);
+        geocache.coins.push(playerCoins.pop()!);
         updateStatusPanel();
       }
     });
 
     return popupDiv;
   });
+
+  return geocache;
 }
 
 function updateStatusPanel() {
-  statusPanel.innerHTML = `Coins: ${
-    playerCoins.map((coin) => `${coin.cache.i}:${coin.cache.j}#${coin.serial}`).join(", ")
-    }`;
+  statusPanel.innerHTML = `Coins: ${playerCoins
+    .map((coin) => `${coin.cache.i}:${coin.cache.j}#${coin.serial}`)
+    .join(", ")}`;
 }
 
-// Generate caches based on player starting location
-const playerStartCell = getCell(36.98949379578401, -122.06277128548504);
+function movePlayer(dLat: number, dLng: number) {
+  playerCell.i += dLat;
+  playerCell.j += dLng;
 
-for (let i = playerStartCell.i - NEIGHBORHOOD_SIZE; i < playerStartCell.i + NEIGHBORHOOD_SIZE; i++) {
-  for (let j = playerStartCell.j - NEIGHBORHOOD_SIZE; j < playerStartCell.j + NEIGHBORHOOD_SIZE; j++) {
-    if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
-      spawnCache(i, j);
+  playerMarker.setLatLng(cellToLatLng(playerCell));
+
+  map.setView(cellToLatLng(playerCell));
+
+  regenerateCaches();
+}
+
+function regenerateCaches() {
+  map.eachLayer((layer: leaflet.Layer) => { // Specify the type here
+    if (layer instanceof leaflet.Rectangle) map.removeLayer(layer);
+  });
+
+  const startI = playerCell.i - NEIGHBORHOOD_SIZE;
+  const startJ = playerCell.j - NEIGHBORHOOD_SIZE;
+  const endI = playerCell.i + NEIGHBORHOOD_SIZE;
+  const endJ = playerCell.j + NEIGHBORHOOD_SIZE;
+
+  for (let i = startI; i < endI; i++) {
+    for (let j = startJ; j < endJ; j++) {
+      if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
+        spawnOrRestoreCache(i, j);
+      }
     }
   }
 }
-//
+
+// Add buttons for movement
+const controls = document.createElement("div");
+controls.innerHTML = `
+  <button id="up">⬆️</button>
+  <button id="down">⬇️</button>
+  <button id="left">⬅️</button>
+  <button id="right">➡️</button>
+`;
+
+document.body.appendChild(controls);
+
+document.getElementById("up")!.addEventListener("click", () => movePlayer(-1, 0));
+document.getElementById("down")!.addEventListener("click", () => movePlayer(1, 0));
+document.getElementById("left")!.addEventListener("click", () => movePlayer(0, -1));
+document.getElementById("right")!.addEventListener("click", () => movePlayer(0, 1));
+
+// Initialize caches
+regenerateCaches();
