@@ -34,6 +34,16 @@ class Geocache implements Momento<string> {
   fromMomento(momento: string) {
     this.coins = JSON.parse(momento);
   }
+
+  // Factory method to create a new Geocache with coins
+  static createNew(i: number, j: number): Geocache {
+    const numCoins = Math.floor(luck([i, j, "initialCoins"].toString()) * 5 + 1);
+    const coins: Coin[] = Array.from({ length: numCoins }, (_, serial) => ({
+      serial,
+      cache: { i, j },
+    }));
+    return new Geocache({ i, j }, coins);
+  }
 }
 
 const NULL_ISLAND = { lat: 0, lng: 0 };
@@ -147,10 +157,12 @@ function spawnOrRestoreCache(i: number, j: number) {
   return geocache;
 }
 
-function updateStatusPanel() {
-  statusPanel.innerHTML = `Coins: ${playerCoins
-    .map((coin) => `<span>${coin.cache.i}:${coin.cache.j}#${coin.serial}</span>`)
-    .join(", ")}`;
+function updateStatusPanel(): void {
+  statusPanel.innerHTML = `
+    Coins: ${playerCoins
+      .map((coin) => `<span>${coin.cache.i}:${coin.cache.j}#${coin.serial}</span>`)
+      .join(", ")}
+  `;
 }
 
 function movePlayer(dLat: number, dLng: number) {
@@ -221,6 +233,57 @@ function resetGameState() {
     regenerateCaches();
   }
 }
+
+function renderCacheOnMap(geocache: Geocache): void {
+  const { cell, coins } = geocache;
+
+  // Draw rectangle to represent the geocache
+  const cacheBounds = leaflet.latLngBounds([
+    cellToLatLng(cell),
+    cellToLatLng({ i: cell.i + 1, j: cell.j + 1 }),
+  ]);
+  const cacheRect = leaflet.rectangle(cacheBounds).addTo(map);
+
+  // Attach popup logic to the rectangle
+  cacheRect.bindPopup(() => {
+    const popupDiv = createCachePopup(geocache);
+    return popupDiv;
+  });
+}
+
+function createCachePopup(geocache: Geocache): HTMLElement {
+  const { coins } = geocache;
+
+  // Create the popup DOM structure
+  const popupDiv = document.createElement("div");
+  popupDiv.innerHTML = `
+    <div>
+      Cache contains <strong>${coins.length} coins</strong>.
+    </div>
+    <button id="collect">Collect</button>
+    <button id="deposit">Deposit</button>
+  `;
+
+  // Add event listeners to "Collect" and "Deposit" buttons
+  popupDiv.querySelector<HTMLButtonElement>("#collect")!.addEventListener("click", () => {
+    if (coins.length > 0) {
+      playerCoins.push(coins.pop()!); // Transfer coin to player's inventory
+      updateStatusPanel();
+    }
+  });
+
+  popupDiv.querySelector<HTMLButtonElement>("#deposit")!.addEventListener("click", () => {
+    if (playerCoins.length > 0) {
+      coins.push(playerCoins.pop()!); // Transfer coin to the geocache
+      updateStatusPanel();
+    }
+  });
+
+  return popupDiv;
+}
+
+
+
 
 // Load saved game state if available
 loadGameState();
